@@ -1,0 +1,13 @@
+# Environment and local secrets
+.env
+
+# Local database
+*.db
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Test and tool caches
+.pytest_cache/
+.coverage
