@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fridge.db")
+LEGACY_USER_ID = 465246312
 
 EXPIRY_DAYS = {
     "молоко": 5,
@@ -37,7 +38,10 @@ MAX_PURCHASE_AGE = timedelta(days=365)
 
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
 
 
 def init_db():
@@ -54,13 +58,20 @@ def init_db():
             expiry_date TEXT,
             purchase_date TEXT,
             status TEXT DEFAULT 'fresh',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            user_id INTEGER NOT NULL
         )
     """)
     try:
         c.execute("SELECT purchase_date FROM products LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE products ADD COLUMN purchase_date TEXT")
+    columns = {row[1] for row in c.execute("PRAGMA table_info(products)")}
+    if "user_id" not in columns:
+        c.execute("ALTER TABLE products ADD COLUMN user_id INTEGER")
+    c.execute("UPDATE products SET user_id = ? WHERE user_id IS NULL", (LEGACY_USER_ID,))
+    c.execute("CREATE INDEX IF NOT EXISTS idx_products_user_expiry ON products(user_id, expiry_date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_products_user_category_expiry ON products(user_id, category, expiry_date)")
     conn.commit()
     conn.close()
 
@@ -84,7 +95,7 @@ def _normalize_purchase_date(purchase_date):
     return parsed_date.strftime("%Y-%m-%d")
 
 
-def add_product(name, quantity, unit, price, category, purchase_date=None):
+def add_product(user_id, name, quantity, unit, price, category, purchase_date=None):
     category_key = (category or "").strip().lower()
     days = EXPIRY_DAYS.get(category_key, 7)
 
@@ -98,75 +109,82 @@ def add_product(name, quantity, unit, price, category, purchase_date=None):
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
-        INSERT INTO products (name, quantity, unit, price, category, expiry_date, purchase_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (name, quantity, unit, price, category, expiry, normalized_purchase_date))
+        INSERT INTO products (name, quantity, unit, price, category, expiry_date, purchase_date, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (name, quantity, unit, price, category, expiry, normalized_purchase_date, user_id))
     conn.commit()
     conn.close()
 
 
-def get_fridge():
+def get_fridge(user_id):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM products ORDER BY expiry_date ASC")
+    c.execute("""
+        SELECT id, name, quantity, unit, price, category, expiry_date,
+               purchase_date, status, created_at
+        FROM products
+        WHERE user_id = ?
+        ORDER BY expiry_date ASC
+    """, (user_id,))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-def get_expiring(days=3):
+def get_expiring(user_id, days=3):
     threshold = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
         SELECT name, quantity, unit, expiry_date FROM products
-        WHERE expiry_date IS NOT NULL AND expiry_date <= ? AND category != 'не еда'
+        WHERE user_id = ? AND expiry_date IS NOT NULL AND expiry_date <= ? AND category != 'не еда'
         ORDER BY expiry_date ASC
-    """, (threshold,))
+    """, (user_id, threshold))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-def get_all_for_cooking():
+def get_all_for_cooking(user_id):
     """Возвращает продукты для готовки: скоропортящиеся идут первыми."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
         SELECT name, quantity, unit, category, expiry_date FROM products
-        WHERE category NOT IN ('не еда', 'хлеб', 'батон', 'выпечка', 'напитки', 'сладости')
+                WHERE user_id = ?
+                    AND category NOT IN ('не еда', 'хлеб', 'батон', 'выпечка', 'напитки', 'сладости')
         ORDER BY CASE WHEN expiry_date IS NULL THEN 1 ELSE 0 END, expiry_date ASC
-    """)
+        """, (user_id,))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-def delete_product(product_id):
+def delete_product(user_id, product_id):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    c.execute("DELETE FROM products WHERE id = ? AND user_id = ?", (product_id, user_id))
     deleted = c.rowcount
     conn.commit()
     conn.close()
     return deleted
 
 
-def delete_expired():
+def delete_expired(user_id):
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM products WHERE expiry_date IS NOT NULL AND expiry_date < ?", (today,))
+    c.execute("DELETE FROM products WHERE user_id = ? AND expiry_date IS NOT NULL AND expiry_date < ?", (user_id, today))
     deleted = c.rowcount
     conn.commit()
     conn.close()
     return deleted
 
 
-def delete_all():
+def delete_all(user_id):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM products")
+    c.execute("DELETE FROM products WHERE user_id = ?", (user_id,))
     deleted = c.rowcount
     conn.commit()
     conn.close()

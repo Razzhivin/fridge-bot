@@ -4,6 +4,7 @@ import logging
 import uuid
 import requests
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import Command
 from dotenv import load_dotenv
@@ -104,15 +105,20 @@ async def handle_photo(msg: Message):
 @dp.callback_query(F.data.startswith("save:"))
 async def save_products(cb: CallbackQuery):
     confirmation_id = cb.data.split(":", 1)[1]
-    pending_data = pending.pop(confirmation_id, None)
+    pending_data = pending.get(confirmation_id)
     if not pending_data:
         await cb.message.edit_text("Срок подтверждения истёк. Отправьте чек ещё раз.")
         return
+    if pending_data["user_id"] != cb.from_user.id:
+        await cb.answer("Это не ваш чек.", show_alert=True)
+        return
+    pending.pop(confirmation_id, None)
 
     products = pending_data["products"]
     purchase_date = pending_data.get("purchase_date")
     for p in products:
         add_product(
+            cb.from_user.id,
             p["name"],
             p["quantity"],
             p["unit"],
@@ -125,12 +131,17 @@ async def save_products(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("cancel:"))
 async def cancel(cb: CallbackQuery):
     confirmation_id = cb.data.split(":", 1)[1]
+    pending_data = pending.get(confirmation_id)
+    if pending_data and pending_data["user_id"] != cb.from_user.id:
+        await cb.answer("Это не ваш чек.", show_alert=True)
+        return
     pending.pop(confirmation_id, None)
     await cb.message.edit_text("❌ Отменено.")
 
 @dp.message(Command("fridge"))
 async def show_fridge(msg: Message):
     from datetime import datetime
+    user_id = msg.from_user.id
 
     def format_days_left(days_left):
         if days_left < 0:
@@ -141,7 +152,7 @@ async def show_fridge(msg: Message):
             return "срок годности: около 1 дня"
         return f"срок годности: около {days_left} дней"
 
-    rows = get_fridge()
+    rows = get_fridge(user_id)
     if not rows:
         await msg.answer("🧊 Холодильник пуст.")
         return
@@ -190,6 +201,7 @@ async def show_fridge(msg: Message):
 
 @dp.message(Command("del"))
 async def delete_items(msg: Message):
+    user_id = msg.from_user.id
     args = msg.text.split()[1:]
     if not args:
         await msg.answer(
@@ -203,7 +215,7 @@ async def delete_items(msg: Message):
     for arg in args:
         try:
             pid = int(arg)
-            if delete_product(pid):
+            if delete_product(user_id, pid):
                 deleted += 1
             else:
                 not_found.append(arg)
@@ -217,7 +229,7 @@ async def delete_items(msg: Message):
 
 @dp.message(Command("clear_expired"))
 async def clear_expired_cmd(msg: Message):
-    deleted = delete_expired()
+    deleted = delete_expired(msg.from_user.id)
     if deleted:
         await msg.answer(f"🗑️ Удалено просроченных товаров: {deleted}")
     else:
@@ -226,14 +238,18 @@ async def clear_expired_cmd(msg: Message):
 @dp.message(Command("clear"))
 async def clear_all_cmd(msg: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑️ Да, очистить всё", callback_data="clear_confirm")],
+        [InlineKeyboardButton(text="🗑️ Да, очистить всё", callback_data=f"clear_confirm:{msg.from_user.id}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="clear_cancel")],
     ])
     await msg.answer("⚠️ Удалить **все** товары из холодильника?", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clear_confirm")
+@dp.callback_query(F.data.startswith("clear_confirm:"))
 async def clear_confirm(cb: CallbackQuery):
-    deleted = delete_all()
+    owner_id = int(cb.data.split(":", 1)[1])
+    if owner_id != cb.from_user.id:
+        await cb.answer("Это не ваш холодильник.", show_alert=True)
+        return
+    deleted = delete_all(cb.from_user.id)
     await cb.message.edit_text(f"🗑️ Холодильник очищен. Удалено: {deleted}")
 
 @dp.callback_query(F.data == "clear_cancel")
@@ -244,7 +260,7 @@ async def clear_cancel(cb: CallbackQuery):
 async def cook(msg: Message):
     from datetime import datetime
 
-    products_raw = get_all_for_cooking()
+    products_raw = get_all_for_cooking(msg.from_user.id)
     if not products_raw:
         await msg.answer("🧊 В холодильнике нет продуктов для готовки.")
         return
@@ -278,7 +294,12 @@ async def cook(msg: Message):
         logging.exception("Ошибка генерации рецептов")
         await wait_msg.edit_text("⚠️ Не удалось приготовить ответ с рецептами. Попробуйте ещё раз.")
         return
-    await wait_msg.edit_text(recipes, parse_mode="Markdown")
+    try:
+        await wait_msg.edit_text(recipes, parse_mode="Markdown")
+    except TelegramBadRequest as error:
+        if "can't parse entities" not in str(error).lower():
+            raise
+        await wait_msg.edit_text(recipes)
 
 async def main():
     init_db()
