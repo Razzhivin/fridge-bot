@@ -1,6 +1,8 @@
 import asyncio
 import os
 import logging
+import uuid
+import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import Command
@@ -13,6 +15,7 @@ from db import (
     add_product,
     get_fridge,
     get_expiring,
+    get_all_for_cooking,
     delete_product,
     delete_expired,
     delete_all,
@@ -31,6 +34,7 @@ logging.getLogger("aiogram.event").setLevel(logging.INFO)
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher()
 pending = {}
+processing = asyncio.Semaphore(2)
 
 @dp.message(Command("start"))
 async def start(msg: Message):
@@ -67,32 +71,46 @@ async def handle_photo(msg: Message):
     file_bytes = await bot.download_file(file.file_path)
     image_bytes = file_bytes.read()
     try:
-        raw_text = recognize_receipt(image_bytes)
+        async with processing:
+            raw_text = await asyncio.to_thread(recognize_receipt, image_bytes)
     except Exception as e:
         await msg.answer(f"❌ Ошибка OCR: {e}")
         return
     try:
-        products = parse_receipt_text(raw_text)
+        async with processing:
+            products, purchase_date = await asyncio.to_thread(parse_receipt_text, raw_text)
     except Exception as e:
         await msg.answer(f"❌ Ошибка парсинга: {e}")
         return
     if not products:
         await msg.answer("🤔 Не удалось найти товары в чеке.")
         return
-    pending[msg.from_user.id] = products
+    confirmation_id = uuid.uuid4().hex[:12]
+    pending[confirmation_id] = {
+        "user_id": msg.from_user.id,
+        "products": products,
+        "purchase_date": purchase_date,
+    }
     lines = ["📋 *Распознанные товары:*\n"]
     for i, p in enumerate(products, 1):
         lines.append(f"{i}. {p['name']} — {p['quantity']} {p['unit']} — {p['price']} ₽")
     lines.append("\nВсё верно?")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Сохранить", callback_data="save")],
-        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel")],
+        [InlineKeyboardButton(text="✅ Сохранить", callback_data=f"save:{confirmation_id}")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{confirmation_id}")],
     ])
     await msg.answer("\n".join(lines), reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "save")
+@dp.callback_query(F.data.startswith("save:"))
 async def save_products(cb: CallbackQuery):
-    products = pending.pop(cb.from_user.id, [])
+    confirmation_id = cb.data.split(":", 1)[1]
+    pending_data = pending.pop(confirmation_id, None)
+    if not pending_data:
+        await cb.message.edit_text("Срок подтверждения истёк. Отправьте чек ещё раз.")
+        return
+
+    products = pending_data["products"]
+    purchase_date = pending_data.get("purchase_date")
     for p in products:
         add_product(
             p["name"],
@@ -100,13 +118,14 @@ async def save_products(cb: CallbackQuery):
             p["unit"],
             p["price"],
             p.get("category", "не еда"),
-            p.get("purchase_date"),
+            purchase_date,
         )
     await cb.message.edit_text(f"✅ Сохранено {len(products)} товаров в холодильник.")
 
-@dp.callback_query(F.data == "cancel")
+@dp.callback_query(F.data.startswith("cancel:"))
 async def cancel(cb: CallbackQuery):
-    pending.pop(cb.from_user.id, None)
+    confirmation_id = cb.data.split(":", 1)[1]
+    pending.pop(confirmation_id, None)
     await cb.message.edit_text("❌ Отменено.")
 
 @dp.message(Command("fridge"))
@@ -223,14 +242,43 @@ async def clear_cancel(cb: CallbackQuery):
 
 @dp.message(Command("cook"))
 async def cook(msg: Message):
-    expiring = get_expiring(days=3)
-    if not expiring:
-        await msg.answer("✨ Пока ничего не портится. Можно не готовить.")
+    from datetime import datetime
+
+    products_raw = get_all_for_cooking()
+    if not products_raw:
+        await msg.answer("🧊 В холодильнике нет продуктов для готовки.")
         return
-    await msg.answer("🍳 Думаю, что приготовить...")
-    products = [{"name": r[0], "quantity": r[1], "unit": r[2]} for r in expiring]
-    recipes = generate_recipes(products)
-    await msg.answer(recipes, parse_mode="Markdown")
+
+    lines = []
+    for name, qty, unit, category, expiry in products_raw:
+        if expiry:
+            days_left = (datetime.strptime(expiry, "%Y-%m-%d") - datetime.now()).days
+            if days_left <= 3:
+                marker = "🔴 СРОЧНО"
+            elif days_left <= 7:
+                marker = "🟡 скоро"
+            else:
+                marker = "🟢 свежее"
+        else:
+            marker = "⚪ без срока"
+        lines.append(f"{marker} | {name} — {qty} {unit}")
+
+    product_list = "\n".join(lines)
+    wait_msg = await msg.answer("🍳 Думаю, что приготовить... (до 1 минуты)")
+    try:
+        async with processing:
+            recipes = await asyncio.to_thread(generate_recipes, product_list)
+    except requests.exceptions.Timeout:
+        await wait_msg.edit_text("⏳ Сервис рецептов не ответил вовремя. Попробуйте ещё раз через минуту.")
+        return
+    except requests.exceptions.RequestException:
+        await wait_msg.edit_text("⚠️ Не удалось подключиться к сервису рецептов. Проверьте интернет и попробуйте позже.")
+        return
+    except Exception:
+        logging.exception("Ошибка генерации рецептов")
+        await wait_msg.edit_text("⚠️ Не удалось приготовить ответ с рецептами. Попробуйте ещё раз.")
+        return
+    await wait_msg.edit_text(recipes, parse_mode="Markdown")
 
 async def main():
     init_db()
@@ -243,7 +291,10 @@ async def main():
         BotCommand(command="clear", description="Очистить всё"),
         BotCommand(command="help", description="Справка"),
     ])
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except asyncio.CancelledError:
+        logging.info("Polling остановлен")
 
 if __name__ == "__main__":
     asyncio.run(main())

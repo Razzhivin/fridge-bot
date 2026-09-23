@@ -1,7 +1,8 @@
+import os
 import sqlite3
 from datetime import datetime, timedelta
 
-DB_PATH = "fridge.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fridge.db")
 
 EXPIRY_DAYS = {
     "молоко": 5,
@@ -31,6 +32,8 @@ EXPIRY_DAYS = {
     "заморозка": 90,
     "не еда": None,
 }
+
+MAX_PURCHASE_AGE = timedelta(days=365)
 
 
 def get_connection():
@@ -62,21 +65,31 @@ def init_db():
     conn.close()
 
 
+def _normalize_purchase_date(purchase_date):
+    today = datetime.now().date()
+    parsed_date = None
+
+    if purchase_date:
+        normalized = str(purchase_date).strip()
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%Y/%m/%d", "%d/%m/%Y"):
+            try:
+                parsed_date = datetime.strptime(normalized, fmt).date()
+                break
+            except ValueError:
+                continue
+
+    if parsed_date is None or parsed_date > today or today - parsed_date > MAX_PURCHASE_AGE:
+        parsed_date = today
+
+    return parsed_date.strftime("%Y-%m-%d")
+
+
 def add_product(name, quantity, unit, price, category, purchase_date=None):
     category_key = (category or "").strip().lower()
     days = EXPIRY_DAYS.get(category_key, 7)
 
-    base_date = datetime.now()
-    if purchase_date:
-        normalized = purchase_date.strip()
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%Y/%m/%d", "%d/%m/%Y"):
-            try:
-                base_date = datetime.strptime(normalized, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            base_date = datetime.now()
+    normalized_purchase_date = _normalize_purchase_date(purchase_date)
+    base_date = datetime.strptime(normalized_purchase_date, "%Y-%m-%d")
 
     expiry = None
     if days is not None:
@@ -87,7 +100,7 @@ def add_product(name, quantity, unit, price, category, purchase_date=None):
     c.execute("""
         INSERT INTO products (name, quantity, unit, price, category, expiry_date, purchase_date)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (name, quantity, unit, price, category, expiry, purchase_date or None))
+    """, (name, quantity, unit, price, category, expiry, normalized_purchase_date))
     conn.commit()
     conn.close()
 
@@ -110,6 +123,20 @@ def get_expiring(days=3):
         WHERE expiry_date IS NOT NULL AND expiry_date <= ? AND category != 'не еда'
         ORDER BY expiry_date ASC
     """, (threshold,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_all_for_cooking():
+    """Возвращает продукты для готовки: скоропортящиеся идут первыми."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT name, quantity, unit, category, expiry_date FROM products
+        WHERE category NOT IN ('не еда', 'хлеб', 'батон', 'выпечка', 'напитки', 'сладости')
+        ORDER BY CASE WHEN expiry_date IS NULL THEN 1 ELSE 0 END, expiry_date ASC
+    """)
     rows = c.fetchall()
     conn.close()
     return rows
