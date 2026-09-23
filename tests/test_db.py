@@ -49,6 +49,21 @@ class DbDateLogicTests(unittest.TestCase):
         row = db.get_fridge()[0]
         self.assertEqual(row[6], (datetime.strptime("2026-09-10", "%Y-%m-%d") + timedelta(days=7)).strftime("%Y-%m-%d"))
 
+    def test_stale_purchase_date_falls_back_to_today(self):
+        db.add_product(
+            name="Молоко",
+            quantity=1,
+            unit="л",
+            price=100,
+            category="молоко",
+            purchase_date="2022-01-04",
+        )
+
+        row = db.get_fridge()[0]
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(row[7], today)
+        self.assertEqual(row[6], (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d"))
+
 
 if __name__ == "__main__":
     unittest.main()
