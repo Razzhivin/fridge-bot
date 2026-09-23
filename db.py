@@ -72,6 +72,17 @@ def init_db():
     c.execute("UPDATE products SET user_id = ? WHERE user_id IS NULL", (LEGACY_USER_ID,))
     c.execute("CREATE INDEX IF NOT EXISTS idx_products_user_expiry ON products(user_id, expiry_date)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_products_user_category_expiry ON products(user_id, category, expiry_date)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS notification_log (
+            user_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            alert_type TEXT NOT NULL,
+            notification_date TEXT NOT NULL,
+            sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, product_id, alert_type, notification_date)
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_notification_log_user_date ON notification_log(user_id, notification_date)")
     conn.commit()
     conn.close()
 
@@ -189,3 +200,52 @@ def delete_all(user_id):
     conn.commit()
     conn.close()
     return deleted
+
+
+def get_expiration_alerts(days=3, user_id=None, notification_date=None):
+    """Возвращает ещё не отправленные предупреждения о сроках годности."""
+    today = datetime.now().date()
+    threshold = today + timedelta(days=days)
+    notification_date = notification_date or today.strftime("%Y-%m-%d")
+
+    conn = get_connection()
+    c = conn.cursor()
+    query = """
+        SELECT p.id, p.user_id, p.name, p.quantity, p.unit, p.expiry_date
+        FROM products p
+        WHERE p.expiry_date IS NOT NULL
+          AND p.category != 'не еда'
+          AND p.expiry_date <= ?
+          AND (? IS NULL OR p.user_id = ?)
+          AND NOT EXISTS (
+              SELECT 1 FROM notification_log n
+              WHERE n.user_id = p.user_id
+                AND n.product_id = p.id
+                AND n.alert_type = CASE
+                    WHEN p.expiry_date < ? THEN 'expired'
+                    ELSE 'expiring'
+                END
+                AND n.notification_date = ?
+          )
+        ORDER BY p.user_id, p.expiry_date, p.id
+    """
+    c.execute(query, (threshold.strftime("%Y-%m-%d"), user_id, user_id,
+                      today.strftime("%Y-%m-%d"), notification_date))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def mark_expiration_alert_sent(user_id, product_id, alert_type, notification_date=None):
+    notification_date = notification_date or datetime.now().strftime("%Y-%m-%d")
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR IGNORE INTO notification_log
+            (user_id, product_id, alert_type, notification_date)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, product_id, alert_type, notification_date))
+    conn.commit()
+    inserted = c.rowcount
+    conn.close()
+    return inserted

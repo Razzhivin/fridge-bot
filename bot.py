@@ -3,6 +3,9 @@ import os
 import logging
 import uuid
 import requests
+from collections import defaultdict
+from datetime import datetime
+from contextlib import suppress
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -20,6 +23,8 @@ from db import (
     delete_product,
     delete_expired,
     delete_all,
+    get_expiration_alerts,
+    mark_expiration_alert_sent,
 )
 
 load_dotenv()
@@ -36,6 +41,7 @@ bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher()
 pending = {}
 processing = asyncio.Semaphore(2)
+ALERT_CHECK_INTERVAL = 60 * 60
 
 @dp.message(Command("start"))
 async def start(msg: Message):
@@ -235,6 +241,47 @@ async def clear_expired_cmd(msg: Message):
     else:
         await msg.answer("✨ Просроченных товаров нет.")
 
+
+def _format_alert_message(rows):
+    lines = ["🔔 *Сроки годности:*"]
+    today = datetime.now().date()
+    for product_id, user_id, name, quantity, unit, expiry in rows:
+        expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        days_left = (expiry_date - today).days
+        if days_left < 0:
+            label = f"просрочено на {abs(days_left)} дн."
+        elif days_left == 0:
+            label = "истекает сегодня"
+        elif days_left == 1:
+            label = "истекает завтра"
+        else:
+            label = f"истекает через {days_left} дн."
+        lines.append(f"• {name} — {quantity} {unit}: {label}")
+    lines.append("\nОткройте /fridge для подробностей.")
+    return "\n".join(lines)
+
+
+async def send_expiration_alerts(user_id=None):
+    rows = get_expiration_alerts(user_id=user_id)
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row[1]].append(row)
+
+    for recipient_id, recipient_rows in grouped.items():
+        try:
+            await bot.send_message(recipient_id, _format_alert_message(recipient_rows))
+        except Exception:
+            logging.exception("Не удалось отправить уведомление пользователю %s", recipient_id)
+            continue
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        for product_id, _, _, _, _, expiry in recipient_rows:
+            alert_type = "expired" if expiry < today else "expiring"
+            mark_expiration_alert_sent(recipient_id, product_id, alert_type, today)
+
+    return len(rows)
+
+
 @dp.message(Command("clear"))
 async def clear_all_cmd(msg: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -312,10 +359,25 @@ async def main():
         BotCommand(command="clear", description="Очистить всё"),
         BotCommand(command="help", description="Справка"),
     ])
+    async def alert_worker():
+        while True:
+            try:
+                await send_expiration_alerts()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("Ошибка фоновой проверки сроков")
+            await asyncio.sleep(ALERT_CHECK_INTERVAL)
+
+    alert_task = asyncio.create_task(alert_worker())
     try:
         await dp.start_polling(bot)
     except asyncio.CancelledError:
         logging.info("Polling остановлен")
+    finally:
+        alert_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await alert_task
 
 if __name__ == "__main__":
     asyncio.run(main())

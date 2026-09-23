@@ -93,6 +93,34 @@ class DbDateLogicTests(unittest.TestCase):
         self.assertEqual(db.get_fridge(self.USER_A), [])
         self.assertEqual(len(db.get_fridge(self.USER_B)), 1)
 
+    def test_expiration_alerts_are_isolated_and_deduplicated(self):
+        today = datetime.now().date()
+        connection = db.get_connection()
+        connection.executemany(
+            """
+            INSERT INTO products
+                (name, quantity, unit, category, expiry_date, purchase_date, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("Молоко", 1, "л", "молоко", (today + timedelta(days=2)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), self.USER_A),
+                ("Рыба", 1, "кг", "рыба", (today - timedelta(days=1)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), self.USER_A),
+                ("Сыр", 1, "кг", "сыр", (today + timedelta(days=2)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), self.USER_B),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+        user_a_alerts = db.get_expiration_alerts(user_id=self.USER_A)
+        user_b_alerts = db.get_expiration_alerts(user_id=self.USER_B)
+        self.assertEqual([row[2] for row in user_a_alerts], ["Рыба", "Молоко"])
+        self.assertEqual([row[2] for row in user_b_alerts], ["Сыр"])
+
+        expired_id = user_a_alerts[0][0]
+        self.assertEqual(db.mark_expiration_alert_sent(self.USER_A, expired_id, "expired"), 1)
+        self.assertEqual(db.mark_expiration_alert_sent(self.USER_A, expired_id, "expired"), 0)
+        self.assertEqual(len(db.get_expiration_alerts(user_id=self.USER_A)), 1)
+
     class DbMigrationTests(unittest.TestCase):
         def setUp(self):
             self.original_db = db.DB_PATH
