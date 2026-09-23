@@ -93,6 +93,22 @@ class DbDateLogicTests(unittest.TestCase):
         self.assertEqual(db.get_fridge(self.USER_A), [])
         self.assertEqual(len(db.get_fridge(self.USER_B)), 1)
 
+    def test_photo_quota_is_persistent_and_atomic(self):
+        quota_time = datetime(2026, 9, 23, 12, 0)
+
+        self.assertTrue(db.consume_photo_quota(self.USER_A, 3, 5, quota_time))
+        self.assertTrue(db.consume_photo_quota(self.USER_A, 3, 5, quota_time))
+        self.assertTrue(db.consume_photo_quota(self.USER_A, 3, 5, quota_time))
+        self.assertFalse(db.consume_photo_quota(self.USER_A, 3, 5, quota_time))
+
+        connection = db.get_connection()
+        rows = connection.execute(
+            "SELECT period_type, used_count FROM usage_counters WHERE user_id = ? ORDER BY period_type",
+            (self.USER_A,),
+        ).fetchall()
+        connection.close()
+        self.assertEqual(rows, [("day", 3), ("month", 3)])
+
     def test_expiration_alerts_are_isolated_and_deduplicated(self):
         today = datetime.now().date()
         connection = db.get_connection()

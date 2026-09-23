@@ -25,9 +25,17 @@ from db import (
     delete_all,
     get_expiration_alerts,
     mark_expiration_alert_sent,
+    consume_photo_quota,
 )
 
 load_dotenv()
+
+
+MAX_PHOTO_BYTES = int(os.getenv("MAX_PHOTO_BYTES", str(10 * 1024 * 1024)))
+MAX_PHOTOS_PER_DAY = int(os.getenv("MAX_PHOTOS_PER_DAY", "3"))
+MAX_PHOTOS_PER_MONTH = int(os.getenv("MAX_PHOTOS_PER_MONTH", "5"))
+MAX_COOK_PER_HOUR = int(os.getenv("MAX_COOK_PER_HOUR", "3"))
+cook_usage = defaultdict(list)
 
 # === ЛОГИРОВАНИЕ ===
 logging.basicConfig(
@@ -42,6 +50,21 @@ dp = Dispatcher()
 pending = {}
 processing = asyncio.Semaphore(2)
 ALERT_CHECK_INTERVAL = 60 * 60
+
+
+def _consume_limit(usage, user_id, limit, period):
+    now = datetime.now().timestamp()
+    timestamps = [timestamp for timestamp in usage[user_id] if now - timestamp < period]
+    if len(timestamps) >= limit:
+        usage[user_id] = timestamps
+        return False
+    timestamps.append(now)
+    usage[user_id] = timestamps
+    return True
+
+
+async def _deny_limit(message, text):
+    await message.answer(text)
 
 @dp.message(Command("start"))
 async def start(msg: Message):
@@ -73,10 +96,21 @@ async def help_cmd(msg: Message):
 
 @dp.message(F.photo)
 async def handle_photo(msg: Message):
+    user_id = msg.from_user.id
+    if not consume_photo_quota(user_id, MAX_PHOTOS_PER_DAY, MAX_PHOTOS_PER_MONTH):
+        await _deny_limit(
+            msg,
+            "⏳ Лимит чеков исчерпан: максимум "
+            f"{MAX_PHOTOS_PER_DAY} в день и {MAX_PHOTOS_PER_MONTH} в месяц.",
+        )
+        return
     await msg.answer("🔍 Распознаю чек...")
     file = await bot.get_file(msg.photo[-1].file_id)
     file_bytes = await bot.download_file(file.file_path)
     image_bytes = file_bytes.read()
+    if len(image_bytes) > MAX_PHOTO_BYTES:
+        await msg.answer("📦 Фото слишком большое. Отправьте чек размером до 10 МБ.")
+        return
     try:
         async with processing:
             raw_text = await asyncio.to_thread(recognize_receipt, image_bytes)
@@ -307,7 +341,12 @@ async def clear_cancel(cb: CallbackQuery):
 async def cook(msg: Message):
     from datetime import datetime
 
-    products_raw = get_all_for_cooking(msg.from_user.id)
+    user_id = msg.from_user.id
+    if not _consume_limit(cook_usage, user_id, MAX_COOK_PER_HOUR, 60 * 60):
+        await _deny_limit(msg, "⏳ Лимит генерации рецептов на час исчерпан. Попробуйте позже.")
+        return
+
+    products_raw = get_all_for_cooking(user_id)
     if not products_raw:
         await msg.answer("🧊 В холодильнике нет продуктов для готовки.")
         return

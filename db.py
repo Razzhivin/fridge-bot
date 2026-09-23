@@ -83,6 +83,15 @@ def init_db():
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_notification_log_user_date ON notification_log(user_id, notification_date)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usage_counters (
+            user_id INTEGER NOT NULL,
+            period_type TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, period_type, period_key)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -125,6 +134,41 @@ def add_product(user_id, name, quantity, unit, price, category, purchase_date=No
     """, (name, quantity, unit, price, category, expiry, normalized_purchase_date, user_id))
     conn.commit()
     conn.close()
+
+
+def consume_photo_quota(user_id, daily_limit, monthly_limit, now=None):
+    """Атомарно резервирует один чек в дневной и месячной квоте."""
+    now = now or datetime.now()
+    periods = (
+        ("day", now.strftime("%Y-%m-%d"), daily_limit),
+        ("month", now.strftime("%Y-%m"), monthly_limit),
+    )
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for period_type, period_key, limit in periods:
+            row = conn.execute(
+                "SELECT used_count FROM usage_counters WHERE user_id = ? AND period_type = ? AND period_key = ?",
+                (user_id, period_type, period_key),
+            ).fetchone()
+            if row and row[0] >= limit:
+                conn.rollback()
+                return False
+
+        for period_type, period_key, _ in periods:
+            conn.execute("""
+                INSERT INTO usage_counters (user_id, period_type, period_key, used_count)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(user_id, period_type, period_key)
+                DO UPDATE SET used_count = used_count + 1
+            """, (user_id, period_type, period_key))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_fridge(user_id):

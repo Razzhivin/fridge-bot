@@ -1,0 +1,88 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^python -c \"import ocr; r=ocr\\._create_session\\(\\)\\.request\\('GET','https://ocr\\.api\\.cloud\\.yandex\\.net/',timeout=ocr\\.urllib3\\.Timeout\\(connect=15,read=20\\)\\); print\\('OCR HTTPS:', r\\.status\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -c \"import llm; r=llm\\._create_session\\(\\)\\.request\\('GET','https://llm\\.api\\.cloud\\.yandex\\.net/',timeout=llm\\.urllib3\\.Timeout\\(connect=15,read=20\\)\\); print\\('LLM HTTPS:', r\\.status\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -c \"import ocr, os, json, base64; s=ocr\\._create_session\\(\\); body=\\{'mimeType':'image/jpeg','languageCodes':\\['\\*'\\],'model':'page','content':base64\\.b64encode\\(b'not-an-image'\\)\\.decode\\(\\)\\}; h=\\{'Content-Type':'application/json','Authorization':'Api-Key '\\+os\\.environ\\['YANDEX_API_KEY'\\],'x-folder-id':os\\.environ\\['YANDEX_FOLDER_ID'\\]\\}; r=s\\.request\\('POST','https://ocr\\.api\\.cloud\\.yandex\\.net/ocr/v1/recognizeText',headers=h,body=json\\.dumps\\(body\\)\\.encode\\(\\),timeout=ocr\\.urllib3\\.Timeout\\(connect=15,read=45\\)\\); print\\('OCR POST:', r\\.status, r\\.data\\[:300\\]\\.decode\\('utf-8','replace'\\)\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -c \"import llm; r=llm\\._call_yandexgpt\\('Ответь одним словом: OK','Проверка связи',temperature=0,max_tokens=10\\); print\\('LLM POST:', r\\[:100\\]\\)\"; python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -c \"import os, tempfile, db; fd,path=tempfile\\.mkstemp\\(suffix='\\.db'\\); os\\.close\\(fd\\); old=db\\.DB_PATH; db\\.DB_PATH=path; db\\.init_db\\(\\); db\\.add_product\\('Молоко',1,'л',100,'молоко'\\); db\\.add_product\\('Хлеб',1,'шт',50,'хлеб'\\); db\\.add_product\\('Картофель',1,'кг',80,'овощи'\\); print\\(\\[\\(row\\[0\\], row\\[3\\]\\) for row in db\\.get_all_for_cooking\\(\\)\\]\\); db\\.DB_PATH=old; os\\.remove\\(path\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^git status --short; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -m unittest tests/test_db\\.py; git diff --check$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "git add": true,
+        "git commit": true,
+        "git switch": true,
+        "git push": true,
+        "git fetch": true,
+        "git pull": true,
+        "/^python -m unittest tests/test_db\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -c \"import sqlite3, db; db\\.init_db\\(\\); c=sqlite3\\.connect\\(db\\.DB_PATH\\); print\\('columns:', \\[r\\[1\\] for r in c\\.execute\\('pragma table_info\\(products\\)'\\)\\]\\); print\\('indexes:', \\[r\\[1\\] for r in c\\.execute\\('pragma index_list\\(products\\)'\\)\\]\\); print\\('rows:', c\\.execute\\('select count\\(\\*\\) from products'\\)\\.fetchone\\(\\)\\[0\\]\\); print\\('legacy rows:', c\\.execute\\('select count\\(\\*\\) from products where user_id = \\?', \\(db\\.LEGACY_USER_ID,\\)\\)\\.fetchone\\(\\)\\[0\\]\\); c\\.close\\(\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -c \"import bot; print\\('bot import: OK'\\)\"; git diff --check; git status --short --branch; git diff --stat$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -m unittest tests/test_db\\.py; python -c \"import bot; print\\('bot import: OK'\\)\"; git diff --check$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^git status --short --branch; python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; git diff --check$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "git merge": true,
+        "/^python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -c \"import bot; print\\('bot import: OK'\\)\"; git diff --check$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -m unittest tests/test_db\\.py; python -c \"import bot; print\\('automatic worker:', bot\\.ALERT_CHECK_INTERVAL, 'seconds'\\); print\\('manual alerts handler:', any\\('alerts' in str\\(route\\) for route in bot\\.dp\\.message\\.handlers\\)\\)\"; git diff --check$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^git status --short --branch; python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; git diff --check; git diff --stat$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "git remote": true,
+        "/^git switch main; git pull --ff-only origin main; git switch development; git merge --ff-only main; python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; git status --short --branch; git log --oneline --decorate -4$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -c \"import bot; assert 465246312 in bot\\.ALLOWED_USER_IDS; assert bot\\.MAX_PHOTOS_PER_DAY == 10; assert bot\\.MAX_COOK_PER_HOUR == 3; print\\('security config: OK'\\)\"; git diff --check; git status --short --branch$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests/test_db\\.py; python -m py_compile bot\\.py db\\.py llm\\.py ocr\\.py prompts\\.py; python -c \"import bot, db; assert bot\\.MAX_PHOTOS_PER_DAY == 3; assert bot\\.MAX_PHOTOS_PER_MONTH == 5; print\\('quota config: OK'\\)\"; git diff --check; git status --short --branch; git diff --stat$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^Select-String -Path \\.env -Pattern '\\^TEST_USER_IDS=\\|\\^MAX_PHOTOS_PER_DAY=\\|\\^MAX_PHOTOS_PER_MONTH='; python -c \"import bot; print\\('allowed ids:', sorted\\(bot\\.ALLOWED_USER_IDS\\)\\); print\\('limits:', bot\\.MAX_PHOTOS_PER_DAY, bot\\.MAX_PHOTOS_PER_MONTH\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
