@@ -92,8 +92,92 @@ def init_db():
             PRIMARY KEY (user_id, period_type, period_key)
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'paid',
+            amount INTEGER NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'XTR',
+            payment_id TEXT,
+            paid_at TEXT NOT NULL,
+            paid_until TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_status ON payments(user_id, status)")
     conn.commit()
     conn.close()
+
+
+SUBSCRIPTION_DAYS = 30
+
+
+def _has_active_subscription(conn, user_id):
+    row = conn.execute(
+        "SELECT paid_until FROM payments WHERE user_id = ? AND status = 'paid' AND paid_until > ?",
+        (user_id, datetime.now().strftime("%Y-%m-%d")),
+    ).fetchone()
+    return row is not None
+
+
+def activate_subscription(user_id, amount=50, currency="XTR", payment_id=None):
+    today = datetime.now()
+    paid_until = (today.replace(hour=23, minute=59, second=59) + timedelta(days=SUBSCRIPTION_DAYS)).strftime("%Y-%m-%d")
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""
+            INSERT INTO payments (user_id, status, amount, currency, payment_id, paid_at, paid_until)
+            VALUES (?, 'paid', ?, ?, ?, ?, ?)
+        """, (user_id, amount, currency, payment_id, today.strftime("%Y-%m-%d"), paid_until))
+        conn.commit()
+        return paid_until
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_subscription_status(user_id):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id, status, amount, currency, payment_id, paid_at, paid_until FROM payments WHERE user_id = ? ORDER BY paid_at DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "payment_id_db": row[0],
+        "status": row[1],
+        "amount": row[2],
+        "currency": row[3],
+        "transaction_id": row[4],
+        "paid_at": row[5],
+        "paid_until": row[6],
+    }
+
+
+def has_active_subscription(user_id):
+    conn = get_connection()
+    try:
+        return _has_active_subscription(conn, user_id)
+    finally:
+        conn.close()
+
+
+def cleanup_expired_subscriptions():
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE payments SET status = 'expired' WHERE status = 'paid' AND paid_until < ?",
+            (datetime.now().strftime("%Y-%m-%d"),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _normalize_purchase_date(purchase_date):
@@ -132,41 +216,55 @@ def add_product(user_id, name, quantity, unit, price, category, purchase_date=No
         INSERT INTO products (name, quantity, unit, price, category, expiry_date, purchase_date, user_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (name, quantity, unit, price, category, expiry, normalized_purchase_date, user_id))
+    product_id = c.lastrowid
     conn.commit()
     conn.close()
+    return product_id
 
 
-def consume_photo_quota(user_id, daily_limit, monthly_limit, now=None):
-    """Атомарно резервирует один чек в дневной и месячной квоте."""
-    now = now or datetime.now()
-    periods = (
-        ("day", now.strftime("%Y-%m-%d"), daily_limit),
-        ("month", now.strftime("%Y-%m"), monthly_limit),
-    )
+TOTAL_RECEIPT_LIMIT = 4
+
+
+def consume_photo_quota(user_id):
+    """Атомарно резервирует один чек в общем счётчике (всего 4 бесплатных чека)."""
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        for period_type, period_key, limit in periods:
-            row = conn.execute(
-                "SELECT used_count FROM usage_counters WHERE user_id = ? AND period_type = ? AND period_key = ?",
-                (user_id, period_type, period_key),
-            ).fetchone()
-            if row and row[0] >= limit:
-                conn.rollback()
-                return False
+        row = conn.execute(
+            "SELECT used_count FROM usage_counters WHERE user_id = ? AND period_type = 'total'",
+            (user_id,),
+        ).fetchone()
+        if row and row[0] >= TOTAL_RECEIPT_LIMIT:
+            conn.rollback()
+            return False
 
-        for period_type, period_key, _ in periods:
-            conn.execute("""
-                INSERT INTO usage_counters (user_id, period_type, period_key, used_count)
-                VALUES (?, ?, ?, 1)
-                ON CONFLICT(user_id, period_type, period_key)
-                DO UPDATE SET used_count = used_count + 1
-            """, (user_id, period_type, period_key))
+        conn.execute("""
+            INSERT INTO usage_counters (user_id, period_type, period_key, used_count)
+            VALUES (?, 'total', 'all', 1)
+            ON CONFLICT(user_id, period_type, period_key)
+            DO UPDATE SET used_count = used_count + 1
+        """, (user_id,))
         conn.commit()
         return True
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+def can_process_receipt(user_id):
+    """Проверяет: активна подписка ИЛИ не исчерпан общий лимит (4 чека)."""
+    conn = get_connection()
+    try:
+        if _has_active_subscription(conn, user_id):
+            return True
+        row = conn.execute(
+            "SELECT used_count FROM usage_counters WHERE user_id = ? AND period_type = 'total'",
+            (user_id,),
+        ).fetchone()
+        total_used = row[0] if row else 0
+        return total_used < TOTAL_RECEIPT_LIMIT
     finally:
         conn.close()
 

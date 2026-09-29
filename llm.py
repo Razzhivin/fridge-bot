@@ -2,6 +2,7 @@ import os
 import json
 import ssl
 import socket
+import time
 import requests
 import urllib3.util.connection
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 API_KEY = os.getenv("YANDEX_API_KEY")
 MODEL_URI = f"gpt://{FOLDER_ID}/yandexgpt/latest"
 API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+LLM_ATTEMPTS = 3
 
 def _call_yandexgpt(system, user, temperature=0.2, max_tokens=2000, timeout=120):
     headers = {
@@ -37,13 +39,20 @@ def _call_yandexgpt(system, user, temperature=0.2, max_tokens=2000, timeout=120)
         ],
     }
     with _create_session() as session:
-        response = session.request(
-            "POST",
-            API_URL,
-            headers=headers,
-            body=json.dumps(body).encode("utf-8"),
-            timeout=urllib3.Timeout(connect=30, read=timeout),
-        )
+        for attempt in range(LLM_ATTEMPTS):
+            try:
+                response = session.request(
+                    "POST",
+                    API_URL,
+                    headers=headers,
+                    body=json.dumps(body).encode("utf-8"),
+                    timeout=urllib3.Timeout(connect=60, read=timeout),
+                )
+                break
+            except urllib3.exceptions.HTTPError:
+                if attempt == LLM_ATTEMPTS - 1:
+                    raise
+                time.sleep(2 ** attempt)
     if response.status >= 400:
         raise RuntimeError(f"YandexGPT HTTP {response.status}: {response.data[:500]!r}")
     return json.loads(response.data)["result"]["alternatives"][0]["message"]["text"]
@@ -57,7 +66,7 @@ def _extract_json(text):
 
 def parse_receipt_text(raw_text):
     system_prompt = PARSE_PROMPT
-    result = _call_yandexgpt(system=system_prompt, user=raw_text, temperature=0.1)
+    result = _call_yandexgpt(system=system_prompt, user=raw_text, temperature=0.1, timeout=180)
     data = _extract_json(result)
     products = data.get("products", [])
     purchase_date = data.get("purchase_date")
