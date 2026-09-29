@@ -1,4 +1,5 @@
 import asyncio
+import aiohttp
 import os
 import logging
 import uuid
@@ -26,14 +27,16 @@ from db import (
     get_expiration_alerts,
     mark_expiration_alert_sent,
     consume_photo_quota,
+    can_process_receipt,
+    activate_subscription,
+    cleanup_expired_subscriptions,
+    get_subscription_status,
 )
 
 load_dotenv()
 
 
 MAX_PHOTO_BYTES = int(os.getenv("MAX_PHOTO_BYTES", str(10 * 1024 * 1024)))
-MAX_PHOTOS_PER_DAY = int(os.getenv("MAX_PHOTOS_PER_DAY", "3"))
-MAX_PHOTOS_PER_MONTH = int(os.getenv("MAX_PHOTOS_PER_MONTH", "5"))
 MAX_COOK_PER_HOUR = int(os.getenv("MAX_COOK_PER_HOUR", "3"))
 cook_usage = defaultdict(list)
 
@@ -75,7 +78,9 @@ async def start(msg: Message):
         "🍳 /cook — что приготовить из того, что скоро испортится.\n"
         "🗑️ /del ID — удалить товар по ID.\n"
         "🧹 /clear_expired — удалить всё просроченное.\n"
-        "🚫 /clear — очистить холодильник полностью."
+        "🚫 /clear — очистить холодильник полностью.\n\n"
+        "💎 Всего 4 бесплатных чека. "
+        "Для безлимита — /subscribe (50 Stars, 30 дней)."
     )
 
 @dp.message(Command("help"))
@@ -88,7 +93,13 @@ async def help_cmd(msg: Message):
         "*/del ID* — удалить товар по ID (можно несколько через пробел).\n"
         "*/clear_expired* — удалить всё просроченное.\n"
         "*/clear* — очистить холодильник полностью.\n"
+        "*/subscribe* — активировать подписку для распознавания чеков.\n"
         "*/help* — эта справка.\n\n"
+        "💎 *Тарифы:*\n"
+        "• Всего 4 бесплатных чека за всё время\n"
+        "• Подписка — 50 Stars на 30 дней (без ограничений)\n\n"
+        "💡 *Как купить Stars:*\n"
+        "Откройте @PremiumBot → /start → «Telegram Stars».\n\n"
         "💡 *Совет:* отправляйте чек сразу после магазина — "
         "тогда сроки годности будут точнее.",
         parse_mode="Markdown"
@@ -97,11 +108,22 @@ async def help_cmd(msg: Message):
 @dp.message(F.photo)
 async def handle_photo(msg: Message):
     user_id = msg.from_user.id
-    if not consume_photo_quota(user_id, MAX_PHOTOS_PER_DAY, MAX_PHOTOS_PER_MONTH):
-        await _deny_limit(
-            msg,
-            "⏳ Лимит чеков исчерпан: максимум "
-            f"{MAX_PHOTOS_PER_DAY} в день и {MAX_PHOTOS_PER_MONTH} в месяц.",
+    cleanup_expired_subscriptions()
+    if not can_process_receipt(user_id):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⭐ Оплатить доступ", switch_inline_query_current_chat="")],
+        ])
+        await msg.answer(
+            "🔒 Вы использовали все 4 бесплатных чека.\n\n"
+            "Активируйте подписку для распознавания:\n"            
+            "• Подписка — 50 Stars на 30 дней (без ограничений)\n\n"
+            "Оплатить через @PremiumBot:\n"
+            "1. Откройте @PremiumBot\n"
+            "2. Отправьте /start\n"
+            "3. Выберите «Telegram Stars»\n"
+            "4. Отправьте мне фото чека — распознавание откроется\n\n"
+            "Или используйте команду /subscribe.",
+            reply_markup=kb,
         )
         return
     await msg.answer("🔍 Распознаю чек...")
@@ -154,6 +176,8 @@ async def save_products(cb: CallbackQuery):
         return
     pending.pop(confirmation_id, None)
 
+    consume_photo_quota(cb.from_user.id)
+
     products = pending_data["products"]
     purchase_date = pending_data.get("purchase_date")
     for p in products:
@@ -177,6 +201,76 @@ async def cancel(cb: CallbackQuery):
         return
     pending.pop(confirmation_id, None)
     await cb.message.edit_text("❌ Отменено.")
+
+
+# ==================== Telegram Stars Payment ====================
+
+@dp.message(Command("subscribe"))
+async def cmd_subscribe(msg: Message):
+    user_id = msg.from_user.id
+
+    subscription = get_subscription_status(user_id)
+    if subscription and subscription["status"] == "paid" and subscription["paid_until"]:
+        try:
+            from datetime import datetime as dt
+            until = dt.strptime(subscription["paid_until"], "%Y-%m-%d").date()
+            await msg.answer(
+                f"⭐ У вас активна подписка до {until.strftime('%d.%m.%Y')}.\n\n"
+                f"Распознавание чеков доступно без ограничений."
+            )
+            return
+        except ValueError:
+            pass
+
+    api_url = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN')}/sendInvoice"
+    payload = {
+        "chat_id": user_id,
+        "reply_to_message_id": msg.message_id,
+        "title": "Распознавание чеков",
+        "description": "Подписка на распознавание чеков — 30 дней, без ограничений",
+        "payload": "receipt_subscription",
+        "provider_token": "",
+        "currency": "XTR",
+        "star_count": 50,
+        "prices": [{"label": "Доступ к распознаванию чеков", "amount": 50}],
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(api_url, json=payload) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logging.error("sendInvoice failed: %s", text)
+                await msg.answer("⚠️ Не удалось создать платёж. Попробуйте позже.")
+                return
+
+
+@dp.pre_checkout_query()
+async def handle_pre_checkout(query):
+    if query.invoice_payload == "receipt_subscription":
+        await bot.answer_pre_checkout_query(query.id, ok=True)
+    else:
+        await bot.answer_pre_checkout_query(query.id, ok=False, error_message="Неизвестный товар")
+
+
+@dp.message(F.successful_payment)
+async def handle_successful_payment(msg: Message):
+    payment_id = msg.successful_payment.invoice_payload
+    user_id = msg.from_user.id
+
+    if payment_id == "receipt_subscription":
+        paid_until = activate_subscription(user_id, amount=50, currency="XTR", payment_id=msg.successful_payment.telegram_payment_charge_id)
+        try:
+            from datetime import datetime as dt
+            until = dt.strptime(paid_until, "%Y-%m-%d").date()
+            await msg.answer(
+                f"✅ Оплата прошла успешно!\n\n"
+                f"Подписка активирована до {until.strftime('%d.%m.%Y')}.\n"
+                f"Распознавание чеков доступно без ограничений."
+            )
+        except ValueError:
+            await msg.answer("✅ Оплата прошла успешно! Подписка активирована.")
+    else:
+        logging.warning("Неизвестный платеж от пользователя %s: %s", user_id, payment_id)
+        await msg.answer("⚠️ Не удалось активировать подписку. Попробуйте ещё раз.")
 
 @dp.message(Command("fridge"))
 async def show_fridge(msg: Message):
@@ -215,29 +309,48 @@ async def show_fridge(msg: Message):
 
     if red:
         lines.append("🔴 *Просрочено / истекает сегодня:*")
-        for pid, name, qty, unit, d in red:
+        for pid, name, qty, unit, d in red[:20]:
             lines.append(f"  `[id:{pid}]` {name} — {qty} {unit} ({format_days_left(d)})")
+        if len(red) > 20:
+            lines.append(f"  ... и ещё {len(red) - 20}")
         lines.append("")
 
     if yellow:
         lines.append("🟡 *Скоро испортится (1–3 дня):*")
-        for pid, name, qty, unit, d in yellow:
+        for pid, name, qty, unit, d in yellow[:20]:
             lines.append(f"  `[id:{pid}]` {name} — {qty} {unit} ({format_days_left(d)})")
+        if len(yellow) > 20:
+            lines.append(f"  ... и ещё {len(yellow) - 20}")
         lines.append("")
 
     if green:
         lines.append("🟢 *Свежее:*")
-        for pid, name, qty, unit, d in green:
+        for pid, name, qty, unit, d in green[:20]:
             lines.append(f"  `[id:{pid}]` {name} — {qty} {unit} ({format_days_left(d)})")
+        if len(green) > 20:
+            lines.append(f"  ... и ещё {len(green) - 20}")
         lines.append("")
 
     if no_date:
         lines.append("⚪ *Без срока (специи, бакалея):*")
-        for pid, name, qty, unit in no_date:
+        for pid, name, qty, unit in no_date[:20]:
             lines.append(f"  `[id:{pid}]` {name} — {qty} {unit}")
+        if len(no_date) > 20:
+            lines.append(f"  ... и ещё {len(no_date) - 20}")
 
-    lines.append("\n💡 Удалить: `/del ID` (можно несколько: `/del 3 5 7`)")
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+    lines.append("\n💡 Удалить: /del ID (можно несколько: /del 3 5 7)")
+    text = "\n".join(lines)
+    truncated = False
+    if len(text) > 4000:
+        text = text[:3997] + "\n\n⋯ (сообщение обрезано)"
+        truncated = True
+    if truncated:
+        await msg.answer(text)
+    else:
+        try:
+            await msg.answer(text, parse_mode="Markdown")
+        except TelegramBadRequest:
+            await msg.answer(text)
 
 @dp.message(Command("del"))
 async def delete_items(msg: Message):
@@ -304,6 +417,12 @@ async def send_expiration_alerts(user_id=None):
     for recipient_id, recipient_rows in grouped.items():
         try:
             await bot.send_message(recipient_id, _format_alert_message(recipient_rows))
+        except TelegramBadRequest as error:
+            if "chat not found" in str(error).lower():
+                logging.info("Пользователь %s удалил бота или заблокировал его", recipient_id)
+            else:
+                logging.exception("Не удалось отправить уведомление пользователю %s", recipient_id)
+            continue
         except Exception:
             logging.exception("Не удалось отправить уведомление пользователю %s", recipient_id)
             continue
@@ -396,6 +515,7 @@ async def main():
         BotCommand(command="del", description="Удалить товар по ID"),
         BotCommand(command="clear_expired", description="Удалить просроченное"),
         BotCommand(command="clear", description="Очистить всё"),
+        BotCommand(command="subscribe", description="Активировать подписку"),
         BotCommand(command="help", description="Справка"),
     ])
     async def alert_worker():
