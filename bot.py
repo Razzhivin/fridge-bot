@@ -9,7 +9,7 @@ from datetime import datetime
 from contextlib import suppress
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, ChatMemberUpdated
 from aiogram.filters import Command
 from dotenv import load_dotenv
 
@@ -261,16 +261,43 @@ async def handle_successful_payment(msg: Message):
         try:
             from datetime import datetime as dt
             until = dt.strptime(paid_until, "%Y-%m-%d").date()
+            until_str = until.strftime("%d.%m.%Y")
             await msg.answer(
                 f"✅ Оплата прошла успешно!\n\n"
-                f"Подписка активирована до {until.strftime('%d.%m.%Y')}.\n"
+                f"Подписка активирована до {until_str}.\n"
                 f"Распознавание чеков доступно без ограничений."
             )
         except ValueError:
+            until_str = paid_until
             await msg.answer("✅ Оплата прошла успешно! Подписка активирована.")
+
+        # Уведомление админу об оплате
+        username = f"@{msg.from_user.username}" if msg.from_user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"💰 *Оплата получена!*\n\n"
+            f"Пользователь: {msg.from_user.full_name} (ID: {user_id})\n"
+            f"Username: {username}\n"
+            f"Сумма: 50 Stars\n"
+            f"Подписка до: {until_str}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
     else:
         logging.warning("Неизвестный платеж от пользователя %s: %s", user_id, payment_id)
         await msg.answer("⚠️ Не удалось активировать подписку. Попробуйте ещё раз.")
+
+        # Уведомление админу о неизвестном платеже
+        username = f"@{msg.from_user.username}" if msg.from_user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"⚠️ *Неизвестный платёж*\n\n"
+            f"Пользователь: {msg.from_user.full_name} (ID: {user_id})\n"
+            f"Username: {username}\n"
+            f"Payload: {payment_id}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
 
 @dp.message(Command("fridge"))
 async def show_fridge(msg: Message):
@@ -456,6 +483,85 @@ async def clear_confirm(cb: CallbackQuery):
 async def clear_cancel(cb: CallbackQuery):
     await cb.message.edit_text("Отменено.")
 
+
+# ==================== Уведомления админу ====================
+
+@dp.my_chat_member()
+async def chat_member_handler(update: ChatMemberUpdated):
+    user = update.from_user
+    if user and not user.is_bot:
+        username = f"@{user.username}" if user.username else "нет"
+        name = user.full_name
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"👤 *Новый пользователь*\n\n"
+            f"Имя: {name}\n"
+            f"Username: {username}\n"
+            f"ID: {user.id}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
+
+
+@dp.callback_query(F.data.startswith("save:"))
+async def save_products(cb: CallbackQuery):
+    confirmation_id = cb.data.split(":", 1)[1]
+    pending_data = pending.get(confirmation_id)
+    if not pending_data:
+        await cb.message.edit_text("Срок подтверждения истёк. Отправьте чек ещё раз.")
+        return
+    if pending_data["user_id"] != cb.from_user.id:
+        await cb.answer("Это не ваш чек.", show_alert=True)
+        return
+    pending.pop(confirmation_id, None)
+
+    consume_photo_quota(cb.from_user.id)
+
+    products = pending_data["products"]
+    purchase_date = pending_data.get("purchase_date")
+    for p in products:
+        add_product(
+            cb.from_user.id,
+            p["name"],
+            p["quantity"],
+            p["unit"],
+            p["price"],
+            p.get("category", "не еда"),
+            purchase_date,
+        )
+
+    # Уведомление админу о чеке
+    username = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
+    lines = [f"🧾 *Новый чек сохранён*", "", f"Пользователь: {cb.from_user.full_name} (ID: {cb.from_user.id})"]
+    if purchase_date:
+        lines.append(f"Дата покупки: {purchase_date}")
+    lines.append(f"Товаров: {len(products)}")
+    lines.append("")
+    lines.append("*Список:*")
+    for i, p in enumerate(products, 1):
+        if i <= 10:
+            lines.append(f"{i}. {p['name']} — {p['quantity']} {p['unit']} — {p['price']} ₽")
+        else:
+            lines.append(f"... и ещё {len(products) - 10}")
+            break
+    lines.append("")
+    lines.append("📱 *Холодильник обновлён.*")
+    await send_admin_notification("\n".join(lines))
+
+    await cb.message.edit_text(f"✅ Сохранено {len(products)} товаров в холодильник.")
+
+
+@dp.callback_query(F.data.startswith("cancel:"))
+async def cancel(cb: CallbackQuery):
+    confirmation_id = cb.data.split(":", 1)[1]
+    pending_data = pending.get(confirmation_id)
+    if pending_data and pending_data["user_id"] != cb.from_user.id:
+        await cb.answer("Это не ваш чек.", show_alert=True)
+        return
+    pending.pop(confirmation_id, None)
+    await cb.message.edit_text("❌ Отменено.")
+
+
 @dp.message(Command("cook"))
 async def cook(msg: Message):
     from datetime import datetime
@@ -505,6 +611,16 @@ async def cook(msg: Message):
         if "can't parse entities" not in str(error).lower():
             raise
         await wait_msg.edit_text(recipes)
+
+async def send_admin_notification(text: str):
+    admin_id = os.getenv("ADMIN_CHAT_ID")
+    if not admin_id:
+        return
+    try:
+        await bot.send_message(int(admin_id), text)
+    except Exception:
+        logging.exception("Не удалось отправить уведомление админу")
+
 
 async def main():
     init_db()
