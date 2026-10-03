@@ -531,6 +531,7 @@ async def save_products(cb: CallbackQuery):
         )
 
     # Уведомление админу о чеке
+    logging.info("save_products: отправка уведомления админу для пользователя %s", cb.from_user.id)
     username = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
     lines = [f"🧾 *Новый чек сохранён*", "", f"Пользователь: {cb.from_user.full_name} (ID: {cb.from_user.id})"]
     if purchase_date:
@@ -615,9 +616,12 @@ async def cook(msg: Message):
 async def send_admin_notification(text: str):
     admin_id = os.getenv("ADMIN_CHAT_ID")
     if not admin_id:
+        logging.warning("ADMIN_CHAT_ID не задан — уведомление не отправлено")
         return
+    logging.info("Отправка уведомления админу (chat_id=%s): %s", admin_id, text[:100])
     try:
         await bot.send_message(int(admin_id), text)
+        logging.info("Уведомление админу отправлено")
     except Exception:
         logging.exception("Не удалось отправить уведомление админу")
 
