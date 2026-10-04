@@ -82,6 +82,19 @@ async def start(msg: Message):
         "💎 Всего 4 бесплатных чека. "
         "Для безлимита — /subscribe (50 Stars, 30 дней)."
     )
+    # Уведомление админу о новом пользователе
+    user = msg.from_user
+    if not user.is_bot:
+        username = f"@{user.username}" if user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"👤 *Новый пользователь — /start*\n\n"
+            f"Имя: {user.full_name}\n"
+            f"Username: {username}\n"
+            f"ID: {user.id}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
 
 @dp.message(Command("help"))
 async def help_cmd(msg: Message):
@@ -138,12 +151,32 @@ async def handle_photo(msg: Message):
             raw_text = await asyncio.to_thread(recognize_receipt, image_bytes)
     except Exception as e:
         await msg.answer(f"❌ Ошибка OCR: {e}")
+        username = f"@{msg.from_user.username}" if msg.from_user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"❌ *Ошибка OCR*\n\n"
+            f"Пользователь: {msg.from_user.full_name} (ID: {user_id})\n"
+            f"Username: {username}\n"
+            f"Ошибка: {e}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
         return
     try:
         async with processing:
             products, purchase_date = await asyncio.to_thread(parse_receipt_text, raw_text)
     except Exception as e:
         await msg.answer(f"❌ Ошибка парсинга: {e}")
+        username = f"@{msg.from_user.username}" if msg.from_user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"❌ *Ошибка парсинга чека*\n\n"
+            f"Пользователь: {msg.from_user.full_name} (ID: {user_id})\n"
+            f"Username: {username}\n"
+            f"Ошибка: {e}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
         return
     if not products:
         await msg.answer("🤔 Не удалось найти товары в чеке.")
@@ -163,44 +196,6 @@ async def handle_photo(msg: Message):
         [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{confirmation_id}")],
     ])
     await msg.answer("\n".join(lines), reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("save:"))
-async def save_products(cb: CallbackQuery):
-    confirmation_id = cb.data.split(":", 1)[1]
-    pending_data = pending.get(confirmation_id)
-    if not pending_data:
-        await cb.message.edit_text("Срок подтверждения истёк. Отправьте чек ещё раз.")
-        return
-    if pending_data["user_id"] != cb.from_user.id:
-        await cb.answer("Это не ваш чек.", show_alert=True)
-        return
-    pending.pop(confirmation_id, None)
-
-    consume_photo_quota(cb.from_user.id)
-
-    products = pending_data["products"]
-    purchase_date = pending_data.get("purchase_date")
-    for p in products:
-        add_product(
-            cb.from_user.id,
-            p["name"],
-            p["quantity"],
-            p["unit"],
-            p["price"],
-            p.get("category", "не еда"),
-            purchase_date,
-        )
-    await cb.message.edit_text(f"✅ Сохранено {len(products)} товаров в холодильник.")
-
-@dp.callback_query(F.data.startswith("cancel:"))
-async def cancel(cb: CallbackQuery):
-    confirmation_id = cb.data.split(":", 1)[1]
-    pending_data = pending.get(confirmation_id)
-    if pending_data and pending_data["user_id"] != cb.from_user.id:
-        await cb.answer("Это не ваш чек.", show_alert=True)
-        return
-    pending.pop(confirmation_id, None)
-    await cb.message.edit_text("❌ Отменено.")
 
 
 # ==================== Telegram Stars Payment ====================
