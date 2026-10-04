@@ -138,12 +138,32 @@ async def handle_photo(msg: Message):
             raw_text = await asyncio.to_thread(recognize_receipt, image_bytes)
     except Exception as e:
         await msg.answer(f"❌ Ошибка OCR: {e}")
+        username = f"@{msg.from_user.username}" if msg.from_user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"❌ *Ошибка OCR*\n\n"
+            f"Пользователь: {msg.from_user.full_name} (ID: {user_id})\n"
+            f"Username: {username}\n"
+            f"Ошибка: {e}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
         return
     try:
         async with processing:
             products, purchase_date = await asyncio.to_thread(parse_receipt_text, raw_text)
     except Exception as e:
         await msg.answer(f"❌ Ошибка парсинга: {e}")
+        username = f"@{msg.from_user.username}" if msg.from_user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"❌ *Ошибка парсинга чека*\n\n"
+            f"Пользователь: {msg.from_user.full_name} (ID: {user_id})\n"
+            f"Username: {username}\n"
+            f"Ошибка: {e}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
         return
     if not products:
         await msg.answer("🤔 Не удалось найти товары в чеке.")
