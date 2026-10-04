@@ -164,44 +164,6 @@ async def handle_photo(msg: Message):
     ])
     await msg.answer("\n".join(lines), reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data.startswith("save:"))
-async def save_products(cb: CallbackQuery):
-    confirmation_id = cb.data.split(":", 1)[1]
-    pending_data = pending.get(confirmation_id)
-    if not pending_data:
-        await cb.message.edit_text("Срок подтверждения истёк. Отправьте чек ещё раз.")
-        return
-    if pending_data["user_id"] != cb.from_user.id:
-        await cb.answer("Это не ваш чек.", show_alert=True)
-        return
-    pending.pop(confirmation_id, None)
-
-    consume_photo_quota(cb.from_user.id)
-
-    products = pending_data["products"]
-    purchase_date = pending_data.get("purchase_date")
-    for p in products:
-        add_product(
-            cb.from_user.id,
-            p["name"],
-            p["quantity"],
-            p["unit"],
-            p["price"],
-            p.get("category", "не еда"),
-            purchase_date,
-        )
-    await cb.message.edit_text(f"✅ Сохранено {len(products)} товаров в холодильник.")
-
-@dp.callback_query(F.data.startswith("cancel:"))
-async def cancel(cb: CallbackQuery):
-    confirmation_id = cb.data.split(":", 1)[1]
-    pending_data = pending.get(confirmation_id)
-    if pending_data and pending_data["user_id"] != cb.from_user.id:
-        await cb.answer("Это не ваш чек.", show_alert=True)
-        return
-    pending.pop(confirmation_id, None)
-    await cb.message.edit_text("❌ Отменено.")
-
 
 # ==================== Telegram Stars Payment ====================
 
