@@ -82,6 +82,19 @@ async def start(msg: Message):
         "💎 Всего 4 бесплатных чека. "
         "Для безлимита — /subscribe (50 Stars, 30 дней)."
     )
+    # Уведомление админу о новом пользователе
+    user = msg.from_user
+    if not user.is_bot:
+        username = f"@{user.username}" if user.username else "нет"
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"👤 *Новый пользователь — /start*\n\n"
+            f"Имя: {user.full_name}\n"
+            f"Username: {username}\n"
+            f"ID: {user.id}\n"
+            f"Дата: {now}"
+        )
+        await send_admin_notification(text)
 
 @dp.message(Command("help"))
 async def help_cmd(msg: Message):
