@@ -31,6 +31,9 @@ from db import (
     activate_subscription,
     cleanup_expired_subscriptions,
     get_subscription_status,
+    record_start,
+    get_users_needing_reminder,
+    mark_reminder_sent,
 )
 
 load_dotenv()
@@ -71,6 +74,7 @@ async def _deny_limit(message, text):
 
 @dp.message(Command("start"))
 async def start(msg: Message):
+    record_start(msg.from_user.id)
     await msg.answer(
         "Привет! Я — умный холодильник 🧊\n\n"
         "📸 Отправь фото чека — я добавлю продукты.\n"
@@ -457,6 +461,34 @@ async def send_expiration_alerts(user_id=None):
     return len(rows)
 
 
+# ==================== Напоминание о чеке ====================
+
+async def send_start_reminder():
+    """Отправляет однократное напоминание через ~23ч после /start."""
+    user_data = get_users_needing_reminder()
+    if not user_data:
+        return
+
+    reminder_text = (
+        "👋 Привет! Напоминаю про вашего умного кухонного помощника.\n\n"
+        "Просто сфотографируйте и отправьте мне любой бумажный чек после магазина (подойдет и вчерашний). Бот автоматически:\n"
+        "• Распознает продукты и добавит их в холодильник\n"
+        "• Станет следить за сроками годности и присылать алерты\n"
+        "• По одной кнопке предложит ИИ-рецепты ужина из того, что нужно съесть прямо сейчас!\n\n"
+        "Первые 4 сканирования чеков — полностью бесплатны. Загружайте фото, давайте проверим бота в деле! 📸"
+    )
+
+    for user_id, _started_at in user_data:
+        try:
+            await bot.send_message(user_id, reminder_text)
+            mark_reminder_sent(user_id)
+            logging.info("Напоминание отправлено пользователю %s", user_id)
+        except Exception:
+            # Заблокировал бота — помечаем как отправленное, чтобы не спамить
+            mark_reminder_sent(user_id)
+            logging.warning("Пользователь %s заблокировал бота, reminder_sent = 1", user_id)
+
+
 @dp.message(Command("clear"))
 async def clear_all_cmd(msg: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -643,15 +675,29 @@ async def main():
                 logging.exception("Ошибка фоновой проверки сроков")
             await asyncio.sleep(ALERT_CHECK_INTERVAL)
 
+    async def start_reminder_worker():
+        while True:
+            try:
+                await send_start_reminder()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("Ошибка фоновой проверки напоминаний")
+            await asyncio.sleep(30 * 60)  # каждые 30 минут
+
     alert_task = asyncio.create_task(alert_worker())
+    reminder_task = asyncio.create_task(start_reminder_worker())
     try:
         await dp.start_polling(bot)
     except asyncio.CancelledError:
         logging.info("Polling остановлен")
     finally:
         alert_task.cancel()
+        reminder_task.cancel()
         with suppress(asyncio.CancelledError):
             await alert_task
+        with suppress(asyncio.CancelledError):
+            await reminder_task
 
 if __name__ == "__main__":
     asyncio.run(main())
