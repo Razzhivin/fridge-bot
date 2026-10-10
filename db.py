@@ -106,6 +106,13 @@ def init_db():
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_status ON payments(user_id, status)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS start_events (
+            user_id INTEGER PRIMARY KEY,
+            first_started_at TEXT NOT NULL,
+            reminder_sent BOOLEAN NOT NULL DEFAULT 0
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -391,3 +398,59 @@ def mark_expiration_alert_sent(user_id, product_id, alert_type, notification_dat
     inserted = c.rowcount
     conn.close()
     return inserted
+
+
+# ==================== Start events & reminder ====================
+
+def record_start(user_id):
+    """Запоминает первого /start пользователя."""
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO start_events (user_id, first_started_at, reminder_sent)
+            VALUES (?, ?, 0)
+            ON CONFLICT(user_id) DO NOTHING
+        """, (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_users_needing_reminder():
+    """Возвращает user_id тех, чей 23-часовой таймер истёк (окно 30 мин), не прислал чек."""
+    conn = get_connection()
+    try:
+        now = datetime.now()
+        # Более ранняя граница (23 часа 30 минут назад)
+        window_end = (now - timedelta(hours=23, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+        # Более поздняя граница (23 часа 00 минут назад)
+        window_start = (now - timedelta(hours=23, minutes=00)).strftime("%Y-%m-%d %H:%M:%S")
+
+        rows = conn.execute("""
+            SELECT se.user_id, se.first_started_at
+            FROM start_events se
+            WHERE se.first_started_at BETWEEN ? AND ?
+              AND se.reminder_sent = 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM usage_counters uc
+                  WHERE uc.user_id = se.user_id
+                    AND uc.period_type = 'total'
+                    AND uc.used_count > 0
+              )
+        """, (window_end, window_start)).fetchall()
+        return [(r[0], r[1]) for r in rows]
+    finally:
+        conn.close()
+
+
+def mark_reminder_sent(user_id):
+    """Помечает напоминание как отправленное."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE start_events SET reminder_sent = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
