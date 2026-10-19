@@ -454,3 +454,44 @@ def mark_reminder_sent(user_id):
         conn.commit()
     finally:
         conn.close()
+
+
+def is_test_drive_passed(user_id: int) -> bool:
+    """
+    Проверяет, прошел ли пользователь тест-драйв или загружал ли уже чеки.
+    Возвращает True, если тест-драйв пройден или квота чеков уже тратилась.
+    """
+    conn = get_connection()
+    try:
+        row_start = conn.execute(
+            "SELECT reminder_sent FROM start_events WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+        row_counter = conn.execute(
+            "SELECT used_count FROM usage_counters WHERE user_id = ? AND period_type = 'total'",
+            (user_id,),
+        ).fetchone()
+
+        passed_start = row_start[0] if row_start else 0
+        used_receipts = row_counter[0] if row_counter else 0
+
+        return (passed_start == 1) or (used_receipts > 0)
+    finally:
+        conn.close()
+
+
+def mark_test_drive_passed(user_id: int):
+    """
+    Помечает тест-драйв как пройденный.
+    Это автоматически отключает фоновый воркер напоминаний через 23ч.
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE start_events SET reminder_sent = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
