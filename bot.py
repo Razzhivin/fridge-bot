@@ -77,11 +77,8 @@ async def _deny_limit(message, text):
 @dp.message(Command("start"))
 async def start(msg: Message):
     user_id = msg.from_user.id
-
-    # 1. Сначала ВСЕГДА фиксируем пользователя в системе (если его там нет)
     record_start(user_id)
 
-    # 2. Только потом проверяем статус тест-драйва / чеков
     if is_test_drive_passed(user_id):
         await msg.answer(
             "🧊 *С возвращением!*\n\n"
@@ -91,7 +88,6 @@ async def start(msg: Message):
         )
         return
 
-    # 3. Логика для новичков
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ Запустить тест-драйв (без чека)", callback_data="run_demo")]
     ])
@@ -139,17 +135,7 @@ async def process_run_demo(cb: CallbackQuery):
 
     await cb.answer()
 
-    # Фиксируем прохождение
     mark_test_drive_passed(user_id)
-
-    # Отправляем алерт админу, чтобы вы видели активацию фичи!
-    username = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
-    await send_admin_notification(
-        f"✨ *Пользователь запустил Тест-драйв!*\n\n"
-        f"Имя: {cb.from_user.full_name}\n"
-        f"Username: {username}\n"
-        f"ID: {user_id}"
-    )
 
     await cb.message.edit_text(
         "🫙 *Заполняю тестовый холодильник...*\n\n"
@@ -163,7 +149,6 @@ async def process_run_demo(cb: CallbackQuery):
 
     await asyncio.sleep(2.5)
 
-    # Безопасный разделитель вместо длинного тире, ломающего Markdown
     demo_recipe = (
         "🍳 *ИИ-ШЕФ РЕКОМЕНДУЕТ: Спасаем ужин!*\n\n"
         "Так как у сметаны и курицы поджимают сроки, готовим сытное и быстрое блюдо.\n\n"
@@ -177,7 +162,7 @@ async def process_run_demo(cb: CallbackQuery):
         "4. Положите любимые специи (отлично подойдет карри, черный перец или сушеный чеснок). Перемешайте.\n"
         "5. Накройте крышкой и томите на медленном огне еще 10-12 минут. Курица станет невероятно мягкой!\n\n"
         "✨ *Приятного аппетита!*\n"
-        "-----------------------------------------\n"
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         "🤖 Точно так же я могу разобрать ваш *настоящий чек* из магазина, автоматически рассчитать сроки годности для каждого продукта и присылать готовые идеи ужинов каждый день.\n\n"
         "👇 *Давайте проверим на вашей еде?*"
     )
@@ -186,11 +171,7 @@ async def process_run_demo(cb: CallbackQuery):
         [InlineKeyboardButton(text="📸 Инструкция как прислать чек", callback_data="receipt_instruction")]
     ])
 
-    try:
-        await cb.message.answer(demo_recipe, reply_markup=kb_upload, parse_mode="Markdown")
-    except TelegramBadRequest:
-        # Резервный вариант на случай непредвиденных ошибок парсинга строк
-        await cb.message.answer(demo_recipe, reply_markup=kb_upload)
+    await cb.message.answer(demo_recipe, reply_markup=kb_upload, parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "receipt_instruction")
